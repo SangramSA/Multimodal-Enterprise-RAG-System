@@ -35,7 +35,8 @@ ENV/
 *.swp
 *.swo
 *~
-*.ini
+# Allow pytest.ini and other config .ini files
+!pytest.ini
 
 # Logs
 logs/
