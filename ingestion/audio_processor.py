@@ -24,7 +24,13 @@ class AudioProcessor(BaseProcessor):
         self.client = openai.OpenAI(api_key=OPENAI_API_KEY)
     
     def _get_audio_info(self, file_path: Path) -> Dict[str, Any]:
-        """Get audio file metadata."""
+        """
+        Get audio file metadata using pydub.
+        
+        Note: Requires ffmpeg/ffprobe to be installed on the system.
+        If not available, returns default values. Duration can be obtained
+        from Whisper API response as a fallback.
+        """
         try:
             audio = AudioSegment.from_file(str(file_path))
             return {
@@ -33,6 +39,21 @@ class AudioProcessor(BaseProcessor):
                 "frame_rate": audio.frame_rate,
                 "channels": audio.channels,
                 "sample_width": audio.sample_width
+            }
+        except FileNotFoundError as e:
+            # ffmpeg/ffprobe not installed
+            logger.debug(
+                f"ffmpeg/ffprobe not found. Audio metadata will use defaults. "
+                f"To get accurate metadata, install ffmpeg: "
+                f"macOS: brew install ffmpeg, Linux: apt-get install ffmpeg, "
+                f"Windows: Download from https://ffmpeg.org"
+            )
+            return {
+                "duration_seconds": 0,
+                "duration_ms": 0,
+                "frame_rate": 0,
+                "channels": 0,
+                "sample_width": 0
             }
         except Exception as e:
             logger.warning(f"Could not read audio metadata: {e}")
@@ -143,13 +164,20 @@ class AudioProcessor(BaseProcessor):
         """Process audio file and return chunks."""
         file_id = self.generate_file_id(file_path)
         
-        # Get audio metadata
+        # Get audio metadata (may be incomplete if ffmpeg not installed)
         audio_info = self._get_audio_info(file_path)
         
         # Transcribe audio
         transcription_result = self._transcribe_with_whisper(file_path)
         transcription_text = transcription_result["text"]
         language = transcription_result.get("language", "unknown")
+        whisper_duration = transcription_result.get("duration")  # Duration from Whisper API
+        
+        # Use Whisper duration as fallback if pydub couldn't get it
+        if audio_info.get("duration_seconds", 0) == 0 and whisper_duration:
+            logger.debug(f"Using duration from Whisper API: {whisper_duration:.2f}s")
+            audio_info["duration_seconds"] = whisper_duration
+            audio_info["duration_ms"] = whisper_duration * 1000
         
         if not transcription_text or not transcription_text.strip():
             logger.warning(f"No transcription extracted from {file_path.name}")
@@ -163,8 +191,8 @@ class AudioProcessor(BaseProcessor):
             chunk["metadata"].update({
                 "language": language,
                 "duration_seconds": audio_info.get("duration_seconds"),
-                "frame_rate": audio_info.get("frame_rate"),
-                "channels": audio_info.get("channels")
+                "frame_rate": audio_info.get("frame_rate", 0),
+                "channels": audio_info.get("channels", 0)
             })
         
         return chunks

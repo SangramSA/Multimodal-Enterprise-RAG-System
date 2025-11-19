@@ -1,6 +1,6 @@
 """Build knowledge graph from extracted entities and relationships."""
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import uuid
 
@@ -67,15 +67,73 @@ class GraphBuilder:
             nodes_created += 1
             logger.info(f"Created {content_label} node: {content_node_id}")
         
-        # Process each chunk's entities and relationships
-        entity_id_map = {}  # Map entity names to node IDs
+        # STEP 1: Build entity_id_map across ALL chunks first
+        # Map entity names to (entity_id, node_type) tuples
+        entity_id_map = {}  # Map entity names to (entity_id, node_type)
+        all_entities = []  # Collect all entities from all chunks
         
+        # Helper function to normalize entity names for matching
+        def normalize_entity_name(name: str) -> str:
+            """Normalize entity name for comparison (lowercase, strip, remove extra spaces)."""
+            return " ".join(name.lower().strip().split())
+        
+        # Helper function to find entity in map with fuzzy matching
+        def find_entity_in_map(name: str) -> Optional[tuple]:
+            """Find entity in map with case-insensitive matching."""
+            # Try exact match first
+            if name in entity_id_map:
+                return entity_id_map[name]
+            
+            # Try normalized match
+            normalized = normalize_entity_name(name)
+            if normalized in normalized_entity_map:
+                original_name = normalized_entity_map[normalized]
+                return entity_id_map.get(original_name)
+            
+            return None
+        
+        # Helper function to find entity in Neo4j if not in map
+        def find_entity_in_neo4j(entity_name: str) -> Optional[tuple]:
+            """Find entity node in Neo4j by name (case-insensitive). Returns (entity_id, node_type) or None."""
+            # Try exact match first
+            for node_type in ["Person", "Organization", "Location", "Concept", "Date"]:
+                query = f"""
+                MATCH (n:{node_type} {{name: $name}})
+                RETURN n.id as id, labels(n)[0] as label
+                LIMIT 1
+                """
+                try:
+                    results = self.client.execute_query(query, {"name": entity_name})
+                    if results:
+                        return (results[0].get("id"), results[0].get("label"))
+                except Exception:
+                    continue
+            
+            # Try case-insensitive match
+            normalized_name = normalize_entity_name(entity_name)
+            for node_type in ["Person", "Organization", "Location", "Concept", "Date"]:
+                query = f"""
+                MATCH (n:{node_type})
+                WHERE toLower(trim(n.name)) = $normalized_name
+                RETURN n.id as id, labels(n)[0] as label, n.name as original_name
+                LIMIT 1
+                """
+                try:
+                    results = self.client.execute_query(query, {"normalized_name": normalized_name})
+                    if results:
+                        return (results[0].get("id"), results[0].get("label"))
+                except Exception:
+                    continue
+            
+            return None
+        
+        # First pass: Create all entity nodes and build the map
         for result in extraction_results:
             chunk_id = result.get("chunk_id")
             entities = result.get("entities", [])
-            relationships = result.get("relationships", [])
+            all_entities.extend(entities)
             
-            # Create entity nodes
+            # Create entity nodes and build the map
             for entity in entities:
                 entity_name = entity.get("name", "").strip()
                 entity_type = entity.get("type", "Concept")
@@ -86,8 +144,11 @@ class GraphBuilder:
                 # Get standardized node type
                 node_type = self.schema_generator.get_node_type(entity_type)
                 entity_id = self.generate_entity_id(entity_name, node_type)
-                entity_id_map[entity_name] = entity_id
                 
+                # Store in map: name -> (id, node_type)
+                entity_id_map[entity_name] = (entity_id, node_type)
+                
+                # Create entity node if it doesn't exist (MERGE handles duplicates)
                 entity_properties = {
                     "id": entity_id,
                     "name": entity_name,
@@ -101,7 +162,6 @@ class GraphBuilder:
                     nodes_created += 1
                 
                 # Link entity to content node
-                rel_type = "MENTIONS"
                 if self.client.create_relationship(
                     source_label=content_label,
                     source_id=content_node_id,
@@ -109,12 +169,23 @@ class GraphBuilder:
                     target_label=node_type,
                     target_id=entity_id,
                     target_id_key="id",
-                    rel_type=rel_type,
+                    rel_type="MENTIONS",
                     properties={"chunk_id": chunk_id}
                 ):
                     relationships_created += 1
+        
+        # Build normalized name map for fuzzy matching (after entities are created)
+        normalized_entity_map = {}  # normalized_name -> original_name
+        for entity_name in entity_id_map.keys():
+            normalized = normalize_entity_name(entity_name)
+            if normalized not in normalized_entity_map:
+                normalized_entity_map[normalized] = entity_name
+            # If we have multiple entities with same normalized name, prefer the first one
+        
+        # STEP 2: Create relationships between entities (now with full entity map)
+        for result in extraction_results:
+            relationships = result.get("relationships", [])
             
-            # Create relationships between entities
             for relationship in relationships:
                 source_name = relationship.get("source", "").strip()
                 target_name = relationship.get("target", "").strip()
@@ -123,39 +194,53 @@ class GraphBuilder:
                 if not source_name or not target_name:
                     continue
                 
-                # Get entity IDs
-                source_id = entity_id_map.get(source_name)
-                target_id = entity_id_map.get(target_name)
+                # Get entity info from map (with fuzzy matching)
+                source_info = find_entity_in_map(source_name)
+                target_info = find_entity_in_map(target_name)
                 
-                if not source_id or not target_id:
-                    # Try to find entity IDs
-                    source_entity = next((e for e in entities if e.get("name") == source_name), None)
-                    target_entity = next((e for e in entities if e.get("name") == target_name), None)
-                    
-                    if source_entity:
-                        source_node_type = self.schema_generator.get_node_type(source_entity.get("type"))
-                        source_id = self.generate_entity_id(source_name, source_node_type)
-                    if target_entity:
-                        target_node_type = self.schema_generator.get_node_type(target_entity.get("type"))
-                        target_id = self.generate_entity_id(target_name, target_node_type)
+                # If not in map, try to find in Neo4j (might be from previous chunks or files)
+                if not source_info:
+                    source_info = find_entity_in_neo4j(source_name)
+                    if source_info:
+                        entity_id_map[source_name] = source_info
+                        normalized_entity_map[normalize_entity_name(source_name)] = source_name
+                        logger.debug(f"Found existing entity in Neo4j: {source_name} -> {source_info[0]}")
                 
-                if source_id and target_id:
-                    standardized_rel_type = self.schema_generator.get_relationship_type(rel_type)
-                    
-                    if self.client.create_relationship(
-                        source_label="Entity",  # Will match any entity type
-                        source_id=source_id,
-                        source_id_key="id",
-                        target_label="Entity",
-                        target_id=target_id,
-                        target_id_key="id",
-                        rel_type=standardized_rel_type,
-                        properties={
-                            "description": relationship.get("description"),
-                            "confidence": relationship.get("confidence", 0.0)
-                        }
-                    ):
-                        relationships_created += 1
+                if not target_info:
+                    target_info = find_entity_in_neo4j(target_name)
+                    if target_info:
+                        entity_id_map[target_name] = target_info
+                        normalized_entity_map[normalize_entity_name(target_name)] = target_name
+                        logger.debug(f"Found existing entity in Neo4j: {target_name} -> {target_info[0]}")
+                
+                # If still not found, skip this relationship
+                if not source_info or not target_info:
+                    logger.warning(
+                        f"Could not find entities for relationship: "
+                        f"{source_name} -> {target_name}. Skipping."
+                    )
+                    continue
+                
+                source_id, source_node_type = source_info
+                target_id, target_node_type = target_info
+                
+                # Use correct node labels (not "Entity")
+                standardized_rel_type = self.schema_generator.get_relationship_type(rel_type)
+                
+                if self.client.create_relationship(
+                    source_label=source_node_type,  # Use actual node type (Person, Organization, etc.)
+                    source_id=source_id,
+                    source_id_key="id",
+                    target_label=target_node_type,  # Use actual node type
+                    target_id=target_id,
+                    target_id_key="id",
+                    rel_type=standardized_rel_type,
+                    properties={
+                        "description": relationship.get("description"),
+                        "confidence": relationship.get("confidence", 0.0)
+                    }
+                ):
+                    relationships_created += 1
         
         logger.success(f"Graph built: {nodes_created} nodes, {relationships_created} relationships")
         
