@@ -47,6 +47,7 @@ data/
 uploads/
 *.pdf
 *.txt
+!requirements.txt
 *.jpg
 *.png
 *.mp3
