@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from graph.neo4j_client import Neo4jClient
+from agents.utils import extract_entities_from_query, format_graph_results
 
 
 class GraphSearch:
@@ -105,4 +106,128 @@ class GraphSearch:
     def get_related_content(self, entity_name: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get content nodes related to an entity."""
         return self.search_by_entity(entity_name, limit)
+    
+    def search_comprehensive(self, query: str, search_type: str = "auto", 
+                            entity_names: Optional[List[str]] = None,
+                            relationship_type: Optional[str] = None,
+                            max_depth: int = 2, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Comprehensive graph search that handles all graph operations.
+        
+        This method can:
+        - Extract entities from natural language queries
+        - Search for entities in the knowledge graph
+        - Traverse relationships between entities
+        - Find paths between entities
+        - Find content (documents/images/audio) related to entities
+        
+        Args:
+            query: Natural language query or entity name(s)
+            search_type: 
+                - "auto": Automatically determine search type from query
+                - "entity": Search for specific entities
+                - "relationship": Find relationships from entities
+                - "path": Find path between two entities
+                - "content": Find content nodes related to entities
+            entity_names: Optional explicit list of entity names (if not provided, extracted from query)
+            relationship_type: Optional specific relationship type to traverse
+            max_depth: Maximum depth for graph traversal (default: 2)
+            limit: Maximum number of results
+        
+        Returns:
+            List of search results
+        """
+        # Extract entities if not provided
+        if not entity_names:
+            entities = extract_entities_from_query(query)
+            entity_names = [e["name"] for e in entities] if entities else []
+        
+        # Auto-detect search type if needed
+        if search_type == "auto":
+            search_type = self._auto_detect_search_type(query)
+        
+        # Execute appropriate search
+        if search_type == "entity":
+            if entity_names:
+                results = self.search_by_entity(entity_names[0], limit=limit)
+            else:
+                logger.warning("No entities found for entity search")
+                results = []
+        
+        elif search_type == "relationship":
+            if entity_names:
+                results = self.search_relationships(
+                    entity_names[0],
+                    relationship_type=relationship_type,
+                    limit=limit
+                )
+            else:
+                logger.warning("No entities found for relationship search")
+                results = []
+        
+        elif search_type == "path":
+            if len(entity_names) >= 2:
+                path = self.find_path(
+                    entity_names[0],
+                    entity_names[1],
+                    max_depth=max_depth
+                )
+                results = [path] if path else []
+            else:
+                logger.warning("Path search requires at least 2 entities")
+                results = []
+        
+        elif search_type == "content":
+            if entity_names:
+                results = self.get_related_content(entity_names[0], limit=limit)
+            else:
+                logger.warning("No entities found for content search")
+                results = []
+        
+        else:
+            # Default: comprehensive search across all entities
+            all_results = []
+            for entity in entity_names:
+                entity_results = self.search_by_entity(entity, limit=limit)
+                all_results.extend(entity_results)
+            
+            # Deduplicate by file_id
+            seen = set()
+            results = []
+            for result in all_results:
+                file_id = result.get("file_id")
+                if file_id and file_id not in seen:
+                    seen.add(file_id)
+                    results.append(result)
+                    if len(results) >= limit:
+                        break
+        
+        return results
+    
+    def _auto_detect_search_type(self, query: str) -> str:
+        """
+        Auto-detect search type from query text.
+        
+        Args:
+            query: Query string
+        
+        Returns:
+            Detected search type
+        """
+        query_lower = query.lower()
+        
+        # Check for path-related keywords
+        if any(word in query_lower for word in ["path", "connect", "link between", "route", "connection"]):
+            return "path"
+        
+        # Check for relationship-related keywords
+        if any(word in query_lower for word in ["relationship", "related", "connected", "associate", "link"]):
+            return "relationship"
+        
+        # Check for content-related keywords
+        if any(word in query_lower for word in ["document", "file", "content", "image", "audio", "about"]):
+            return "content"
+        
+        # Default to entity search
+        return "entity"
 
