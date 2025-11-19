@@ -8,7 +8,7 @@ A modular, evaluation-first multimodal Retrieval-Augmented Generation (RAG) syst
 - **Knowledge Graph**: Neo4j-based graph construction with entity and relationship extraction
 - **Vector Database**: Qdrant for semantic search
 - **Hybrid Search**: Combines graph traversal, keyword search, and vector similarity
-- **Agent Orchestration**: LangChain-based retrieval agents
+- **Agent Orchestration**: LangChain-based retrieval agents, CrewAI multi-agent framework (optional)
 - **Evaluation Framework**: DeepEval-based test suite with metrics
 - **Domain Classification**: Automatic domain tagging for documents
 - **Streamlit UI**: Interactive web interface for file upload and querying
@@ -22,8 +22,8 @@ The system follows a modular pipeline architecture:
 3. **Knowledge Graph**: Neo4j for structured relationships
 4. **Vector Database**: Qdrant for semantic search
 5. **Hybrid Search**: Graph + Keyword + Vector retrieval
-6. **Agent Orchestration**: LangChain agents for retrieval
-7. **Query Pipeline**: End-to-end query processing
+6. **Agent Orchestration**: LangChain agents for retrieval, CrewAI for multi-agent orchestration (optional)
+7. **Query Pipeline**: End-to-end query processing with agentic pipeline support
 
 ## Prerequisites
 
@@ -88,7 +88,23 @@ streamlit run ui/app.py
 
 ### Evaluation
 
-The evaluation process has two steps:
+The evaluation framework uses **DeepEval** for metrics calculation and **Confident AI** for hosted evaluation reports.
+
+#### Metrics
+
+The system evaluates using DeepEval RAG metrics, following [DeepEval's RAG evaluation best practices](https://deepeval.com/docs/getting-started-rag):
+
+**Retriever Metrics (RAG Triad)**:
+- **Contextual Relevancy**: How relevant are the retrieved contexts to the query?
+- **Contextual Precision**: Of the retrieved contexts, how many are relevant? (requires ground truths)
+- **Contextual Recall**: Of all relevant contexts, how many were retrieved? (requires ground truths)
+
+**Generator Metrics (Answer Quality)**:
+- **Hallucination Score**: Detects if the answer contains information not present in the retrieval context
+- **Answer Relevancy**: Measures how relevant the answer is to the query
+- **Faithfulness**: Evaluates if the answer is faithful to the retrieved context
+
+#### Running Evaluations
 
 1. **Ingest test data** (first time only):
 ```bash
@@ -115,6 +131,71 @@ You can also customize the number of samples:
 python evals/run_evaluation.py --squad-samples 50 --docvqa-samples 25 --fleurs-samples 25
 ```
 
+**Parallel Execution**:
+```bash
+# Run with 4 parallel workers (faster for large test suites)
+python evals/run_evaluation.py --skip-ingestion --parallel 4
+
+# Combine with custom sample sizes
+python evals/run_evaluation.py --squad-samples 100 --parallel 4
+```
+
+**Note**: Parallel execution is recommended for large test suites. Start with 2-4 workers and adjust based on your system resources and API rate limits.
+
+#### Confident AI Integration
+
+**Important**: DeepEval automatically uploads results to Confident AI when using the `evaluate()` function. Since we use `measure()` directly for more control, automatic uploads are not available.
+
+To enable Confident AI reporting with DeepEval's native integration:
+
+1. **Set the API key** (DeepEval expects `CONFIDENT_API_KEY`):
+```bash
+CONFIDENT_API_KEY=your_api_key
+```
+
+2. **Optional legacy support** (for custom client):
+```bash
+CONFIDENT_AI_API_KEY=your_api_key  # Legacy, also sets CONFIDENT_API_KEY
+CONFIDENT_AI_PROJECT=your_project_name
+CONFIDENT_AI_ENABLED=true
+```
+
+**Note**: 
+- DeepEval's automatic uploads work when using `evaluate()` function
+- Our current implementation uses `measure()` directly, so automatic uploads are not available
+- Custom upload endpoint is deprecated (404 error expected)
+- To use automatic uploads, consider refactoring to use DeepEval's `evaluate()` function
+
+#### DeepEval Caching
+
+To avoid redundant API calls and speed up evaluations, DeepEval results are automatically cached. The cache stores metric results based on a hash of the inputs (query, answer, expected answer, context).
+
+**Cache Location**: `logs/deepeval_cache.json`
+
+**Enable/Disable Caching**:
+```bash
+# In .env file
+DEEPEVAL_CACHE_ENABLED=true   # Enable (default)
+DEEPEVAL_CACHE_ENABLED=false  # Disable
+```
+
+**Manage Cache**:
+```bash
+# View cache statistics
+python scripts/manage_deepeval_cache.py stats
+
+# Clear cache
+python scripts/manage_deepeval_cache.py clear
+
+# Show cache contents
+python scripts/manage_deepeval_cache.py show
+```
+
+**Benefits**:
+- **Faster re-runs**: Identical test cases use cached results
+- **Cost savings**: Avoids duplicate OpenAI API calls
+- **Resume capability**: If evaluation fails, cached results are preserved
+
 ## Project Structure
 
 ```
@@ -135,20 +216,6 @@ multimodal-enterprise-rag/
 ├── utils/                      # Utilities
 └── tests/                      # Tests
 ```
-
-## Evaluation
-
-The system includes comprehensive evaluation metrics:
-- Retrieval quality (precision@k, recall@k)
-- Hallucination rate
-- Latency (p50, p95, p99)
-- Answer relevance
-- Exact match and F1 scores
-
-Test cases are extracted from:
-- SQuAD v2 (text QA)
-- DocVQA (visual document QA)
-- FLEURS (audio QA)
 
 ## Error Handling
 

@@ -105,11 +105,39 @@ The UI will open in your browser at http://localhost:8501
 - Activate your virtual environment
 - Reinstall dependencies: `pip install -r requirements.txt`
 
+## Step 8: Run Evaluation (Optional)
+
+To evaluate system performance:
+
+1. **Ingest test data** (first time only):
+```bash
+python evals/run_evaluation.py
+```
+
+2. **Skip ingestion** (if data already ingested):
+```bash
+python evals/run_evaluation.py --skip-ingestion
+```
+
+3. **View results**: Check `logs/eval_results.json` for detailed metrics
+
+### Confident AI Integration (Optional)
+
+To enable Confident AI reporting, add to your `.env`:
+```bash
+CONFIDENT_AI_API_KEY=your_api_key
+CONFIDENT_AI_PROJECT=your_project_name
+CONFIDENT_AI_ENABLED=true
+```
+
+After running evaluations, you'll get a link to the Confident AI dashboard for hosted reports.
+
 ## Next Steps
 
 - Explore the **Graph Explorer** to see knowledge graph relationships
 - Run **Evaluation** to test system performance
 - Check logs in the `logs/` directory for detailed information
+- View evaluation reports on Confident AI (if enabled)
 
 ## Stopping the System
 
