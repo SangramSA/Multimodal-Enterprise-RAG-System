@@ -69,3 +69,5 @@ test_results/
 # Streamlit
 .streamlit/
 .coverage
+# Cursor IDE
+.cursor/
