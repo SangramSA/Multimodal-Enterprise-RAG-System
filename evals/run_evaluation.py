@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,20 +11,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from loguru import logger
 from evals.test_suite import TestSuite
 from evals.ingest_test_data import TestDataIngester
+from evals.confident_ai_client import get_confident_ai_client
 from utils.config import validate_config, EVAL_LOG_PATH
 from utils.logging import logger as app_logger
 
 
-def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
-                   docvqa_samples: int = 50, fleurs_samples: int = 50):
+def run_evaluation(ingest_data: bool = True, test_cases: int = 10,
+                   max_workers: int = 1, use_automatic_upload: bool = False):
     """
     Run the complete evaluation pipeline.
     
+    By default, only evaluates on SQuAD v2 data.
+    
     Args:
         ingest_data: Whether to ingest test data first (if False, assumes data is already ingested)
-        squad_samples: Number of SQuAD v2 samples to use
-        docvqa_samples: Number of DocVQA samples to use
-        fleurs_samples: Number of FLEURS samples to use
+        test_cases: Number of SQuAD v2 test cases to run
+        max_workers: Number of parallel workers (1 = sequential, >1 = parallel)
+        use_automatic_upload: Use DeepEval's evaluate() for automatic Confident AI uploads
     """
     # Validate config
     is_valid, error = validate_config()
@@ -92,9 +95,9 @@ def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
             )
             
             ingestion_results = ingester.ingest_all(
-                squad_samples=squad_samples,
-                docvqa_samples=docvqa_samples,
-                fleurs_samples=fleurs_samples
+                squad_samples=test_cases,
+                docvqa_samples=0,
+                fleurs_samples=0
             )
             
             logger.success("Test data ingestion completed")
@@ -108,16 +111,47 @@ def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
         logger.info("=" * 60)
         
         test_suite = TestSuite()
-        test_cases = test_suite.build_test_suite()
+        test_cases_list = test_suite.build_test_suite(
+            squad_samples=test_cases,
+            docvqa_samples=0,
+            fleurs_samples=0
+        )
         
-        logger.success(f"Test suite built with {len(test_cases)} test cases")
+        logger.success(f"Test suite built with {len(test_cases_list)} test cases")
         
         # Step 3: Run evaluation
         logger.info("=" * 60)
         logger.info("STEP 3: Running evaluation")
         logger.info("=" * 60)
         
-        evaluation_results = test_suite.evaluate(query_pipeline, test_cases=test_cases)
+        evaluation_results = test_suite.evaluate(
+            query_pipeline, 
+            test_cases=test_cases_list,
+            max_workers=max_workers,
+            use_automatic_upload=use_automatic_upload
+        )
+        
+        # Note: DeepEval automatically uploads to Confident AI when using evaluate() function
+        # Since we're using measure() directly, we can't use automatic uploads.
+        # The custom upload is deprecated - users should set CONFIDENT_API_KEY and use
+        # DeepEval's evaluate() function for automatic uploads.
+        confident_client = get_confident_ai_client()
+        if confident_client.is_enabled():
+            # Try custom upload (deprecated, will log warning)
+            confident_response = confident_client.upload_results(evaluation_results)
+            if confident_response:
+                evaluation_results["confident_ai_run_id"] = confident_response.get("id")
+                evaluation_results["confident_ai_report_url"] = confident_response.get(
+                    "dashboard_url"
+                )
+            else:
+                # Check if DeepEval's CONFIDENT_API_KEY is set for automatic uploads
+                import os
+                if os.getenv("CONFIDENT_API_KEY"):
+                    logger.info(
+                        "CONFIDENT_API_KEY is set. "
+                        "To enable automatic uploads, consider using DeepEval's evaluate() function."
+                    )
         
         # Step 4: Save results
         logger.info("=" * 60)
@@ -125,10 +159,10 @@ def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
         logger.info("=" * 60)
         
         results = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "ingestion_results": ingestion_results,
             "evaluation_results": evaluation_results,
-            "test_cases_count": len(test_cases)
+            "test_cases_count": len(test_cases_list)
         }
         
         # Save to file
@@ -146,20 +180,13 @@ def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
         logger.info("=" * 60)
         logger.info(f"Total Tests: {evaluation_results.get('total_tests', 0)}")
         logger.info("")
-        logger.info("Custom Metrics:")
-        logger.info(f"  Precision@5: {evaluation_results.get('avg_precision_at_5', 0):.3f}")
-        logger.info(f"  Recall@5: {evaluation_results.get('avg_recall_at_5', 0):.3f}")
-        logger.info(f"  F1 Score: {evaluation_results.get('avg_f1', 0):.3f}")
-        logger.info(f"  Exact Match Rate: {evaluation_results.get('exact_match_rate', 0):.3f}")
-        logger.info(f"  Avg Semantic Similarity: {evaluation_results.get('avg_semantic_similarity', 0):.3f}")
-        logger.info("")
-        logger.info("DeepEval Metrics:")
+        logger.info("DeepEval Metrics - Generator (Answer Quality):")
         hallucination_score = evaluation_results.get('avg_hallucination_score')
         if hallucination_score is not None:
             logger.info(f"  Hallucination Score: {hallucination_score:.3f} (lower is better)")
             logger.info(f"  Hallucination Rate: {evaluation_results.get('hallucination_rate', 0):.3f}")
         else:
-            logger.info("  Hallucination Score: N/A (no context provided)")
+            logger.info("  Hallucination Score: N/A (no retrieval context provided)")
         
         relevancy = evaluation_results.get('avg_answer_relevancy')
         if relevancy is not None:
@@ -171,12 +198,17 @@ def run_evaluation(ingest_data: bool = True, squad_samples: int = 100,
         if faithfulness is not None:
             logger.info(f"  Faithfulness: {faithfulness:.3f}")
         else:
-            logger.info("  Faithfulness: N/A (no context provided)")
+            logger.info("  Faithfulness: N/A (no retrieval context provided)")
+        
         logger.info("")
         logger.info("Performance:")
         latency = evaluation_results.get('latency', {})
         logger.info(f"  Mean Latency: {latency.get('mean', 0):.3f}s")
         logger.info(f"  P95 Latency: {latency.get('p95', 0):.3f}s")
+        report_url = evaluation_results.get("confident_ai_report_url")
+        if report_url:
+            logger.info("")
+            logger.info(f"Confident AI Testing Report: {report_url}")
         
         return results
         
@@ -194,20 +226,20 @@ def main():
     parser = argparse.ArgumentParser(description="Run evaluation pipeline")
     parser.add_argument("--skip-ingestion", action="store_true",
                         help="Skip data ingestion (assumes data is already ingested)")
-    parser.add_argument("--squad-samples", type=int, default=100,
-                        help="Number of SQuAD v2 samples (default: 100)")
-    parser.add_argument("--docvqa-samples", type=int, default=50,
-                        help="Number of DocVQA samples (default: 50)")
-    parser.add_argument("--fleurs-samples", type=int, default=50,
-                        help="Number of FLEURS samples (default: 50)")
+    parser.add_argument("--test-cases", type=int, default=10,
+                        help="Number of test cases to run (default: 10)")
+    parser.add_argument("--parallel", type=int, default=1, metavar="N",
+                        help="Number of parallel workers (default: 1, sequential execution)")
+    parser.add_argument("--use-automatic-upload", action="store_true",
+                        help="Use DeepEval's evaluate() function for automatic Confident AI uploads (requires CONFIDENT_API_KEY)")
     
     args = parser.parse_args()
     
     results = run_evaluation(
         ingest_data=not args.skip_ingestion,
-        squad_samples=args.squad_samples,
-        docvqa_samples=args.docvqa_samples,
-        fleurs_samples=args.fleurs_samples
+        test_cases=args.test_cases,
+        max_workers=args.parallel,
+        use_automatic_upload=args.use_automatic_upload
     )
     
     if results:
