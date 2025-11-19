@@ -38,6 +38,20 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 # Evaluation Configuration
 EVAL_MODE = os.getenv("EVAL_MODE", "development")
 EVAL_LOG_PATH = os.getenv("EVAL_LOG_PATH", str(LOGS_DIR / "eval_results.json"))
+DEEPEVAL_CACHE_ENABLED = os.getenv("DEEPEVAL_CACHE_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+# Confident AI Configuration
+# Note: DeepEval uses CONFIDENT_API_KEY (not CONFIDENT_AI_API_KEY) for automatic uploads
+CONFIDENT_API_KEY = os.getenv("CONFIDENT_API_KEY") or os.getenv("CONFIDENT_AI_API_KEY")
+CONFIDENT_AI_API_KEY = os.getenv("CONFIDENT_AI_API_KEY")  # Legacy support
+CONFIDENT_AI_PROJECT = os.getenv("CONFIDENT_AI_PROJECT")
+CONFIDENT_AI_BASE_URL = os.getenv("CONFIDENT_AI_BASE_URL", "https://api.confident-ai.com")
+CONFIDENT_AI_ENABLED = os.getenv("CONFIDENT_AI_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+# Set CONFIDENT_API_KEY for DeepEval's automatic integration
+if CONFIDENT_API_KEY and not os.getenv("CONFIDENT_API_KEY"):
+    import os as os_module
+    os_module.environ["CONFIDENT_API_KEY"] = CONFIDENT_API_KEY
 
 # Domain Tags
 DOMAIN_TAGS = [
