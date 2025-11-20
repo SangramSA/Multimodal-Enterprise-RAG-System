@@ -35,6 +35,10 @@ The system follows a modular pipeline architecture:
 - Docker and Docker Compose
 - OpenAI API key
 
+## Quick Start
+
+For detailed setup instructions, see the [Quick Start Guide](docs/QUICKSTART.md).
+
 ## Setup
 
 1. **Clone the repository**:
@@ -83,6 +87,10 @@ python setup/init_databases.py
 streamlit run ui/app.py
 ```
 
+The UI will open in your browser at http://localhost:8501
+
+**For detailed setup instructions and troubleshooting, see [docs/QUICKSTART.md](docs/QUICKSTART.md)**
+
 ## Usage
 
 ### File Upload
@@ -93,8 +101,20 @@ streamlit run ui/app.py
 
 ### Querying
 
+The system supports two query pipelines:
+
+**Standard Pipeline**: Fast, linear processing for straightforward queries
+- Best for: Simple factual queries, high-throughput scenarios
+- Lower latency, simpler architecture
+
+**Agentic Pipeline**: Advanced multi-agent system for complex reasoning
+- Best for: Complex queries requiring relationship traversal and synthesis
+- Supports multi-step reasoning with transparent explanations
+- Optional CrewAI orchestration for role-based coordination
+
+**Query Flow**:
 1. Enter a natural language query in the query interface
-2. Choose between standard pipeline or CrewAI orchestration (optional)
+2. Choose between standard or agentic pipeline (and CrewAI orchestration if using agentic)
 3. View results with citations and source documents
 4. Review reasoning steps for complex queries (if using agentic pipeline)
 5. Explore the knowledge graph interactively using the Graph Explorer
@@ -349,7 +369,22 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Key Technologies
+
+- **LLM**: OpenAI (GPT-4o, GPT-4 Vision, Whisper, text-embedding-3-small)
+- **Graph Database**: Neo4j 5.15.0
+- **Vector Database**: Qdrant
+- **Orchestration**: LangChain 1.0, CrewAI (optional)
+- **Evaluation**: DeepEval, Confident AI
+- **UI**: Streamlit, pyvis, NetworkX
+- **Observability**: LangSmith, OpenTelemetry
+- **Testing**: pytest, pytest-cov
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Support
+
+For issues, questions, or feature requests, please open an issue on GitHub.
 
