@@ -86,7 +86,7 @@ class TestSuite:
         
         samples = []
         fleurs_dir = Path(__file__).parent.parent / "google-fleurs-audio-files"
-        tsv_file = Path(__file__).parent.parent / "fleurs-en_us-dataset.tsv"
+        tsv_file = Path(__file__).parent / "test_data" / "fleurs-en_us-dataset.tsv"
         
         if not tsv_file.exists():
             logger.error(f"FLEURS TSV file not found: {tsv_file}")

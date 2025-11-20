@@ -4,14 +4,18 @@ A modular, evaluation-first multimodal Retrieval-Augmented Generation (RAG) syst
 
 ## Features
 
-- **Multimodal Ingestion**: Support for PDF, TXT, JPG, PNG, MP3 files
+- **Multimodal Ingestion**: Support for PDF, TXT, JPG, PNG, MP3 files with intelligent chunking
 - **Knowledge Graph**: Neo4j-based graph construction with entity and relationship extraction
-- **Vector Database**: Qdrant for semantic search
-- **Hybrid Search**: Combines graph traversal, keyword search, and vector similarity
-- **Agent Orchestration**: LangChain-based retrieval agents, CrewAI multi-agent framework (optional)
-- **Evaluation Framework**: DeepEval-based test suite with metrics
+- **Vector Database**: Qdrant for semantic search with rich metadata
+- **Hybrid Search**: Combines graph traversal, keyword search, and vector similarity using RRF
+- **Agentic Query Pipeline**: 5-stage agent orchestration (validation, triage, retrieval, generation, post-processing)
+- **CrewAI Integration**: Optional multi-agent framework for sophisticated orchestration
+- **Multi-Step Reasoning**: Advanced reasoning capabilities with transparent step-by-step explanations
+- **Evaluation Framework**: DeepEval-based test suite with automatic Confident AI reporting
 - **Domain Classification**: Automatic domain tagging for documents
-- **Streamlit UI**: Interactive web interface for file upload and querying
+- **Interactive Graph Explorer**: Visual graph exploration using pyvis (similar to Neo4j browser)
+- **Telemetry & Observability**: Comprehensive metrics tracking with LangSmith integration
+- **Streamlit UI**: Interactive web interface for file upload, querying, graph exploration, and evaluation
 
 ## Architecture
 
@@ -82,9 +86,32 @@ streamlit run ui/app.py
 ### Querying
 
 1. Enter a natural language query in the query interface
-2. Select query type (factual lookup, visual QA, audio QA, etc.)
+2. Choose between standard pipeline or CrewAI orchestration (optional)
 3. View results with citations and source documents
-4. Explore the knowledge graph visualization
+4. Review reasoning steps for complex queries (if using agentic pipeline)
+5. Explore the knowledge graph interactively using the Graph Explorer
+
+#### Agentic Query Pipeline
+
+The system supports an advanced agentic query pipeline with 5 specialized agents:
+
+1. **Query Validation Agent**: Validates queries with security checks and complexity assessment
+2. **Query Triage Agent**: Classifies queries and selects optimal search strategy
+3. **Retrieval Orchestration Agent**: Orchestrates multiple search methods with direct data store access
+4. **Answer Generation Agent**: Generates answers with multi-step reasoning when needed
+5. **Post-Processing Agent**: Validates answers, detects hallucinations, and verifies citations
+
+Enable CrewAI orchestration in the UI for role-based multi-agent coordination.
+
+#### Graph Explorer
+
+The Graph Explorer provides interactive visualization of the knowledge graph:
+
+- **Entity Search**: Find entities and their connections
+- **Full Graph View**: View entire graph structure (with node limits)
+- **Subgraph Exploration**: Explore neighborhood around specific entities
+- **Interactive Features**: Drag nodes, zoom, pan, and view relationship details
+- **Statistics**: View node type distribution and relationship counts
 
 ### Evaluation
 
@@ -92,17 +119,14 @@ The evaluation framework uses **DeepEval** for metrics calculation and **Confide
 
 #### Metrics
 
-The system evaluates using DeepEval RAG metrics, following [DeepEval's RAG evaluation best practices](https://deepeval.com/docs/getting-started-rag):
-
-**Retriever Metrics (RAG Triad)**:
-- **Contextual Relevancy**: How relevant are the retrieved contexts to the query?
-- **Contextual Precision**: Of the retrieved contexts, how many are relevant? (requires ground truths)
-- **Contextual Recall**: Of all relevant contexts, how many were retrieved? (requires ground truths)
+The system evaluates using DeepEval generator metrics, following [DeepEval's RAG evaluation best practices](https://deepeval.com/docs/getting-started-rag):
 
 **Generator Metrics (Answer Quality)**:
-- **Hallucination Score**: Detects if the answer contains information not present in the retrieval context
-- **Answer Relevancy**: Measures how relevant the answer is to the query
-- **Faithfulness**: Evaluates if the answer is faithful to the retrieved context
+- **Hallucination Score**: Detects if the answer contains information not present in the retrieval context (lower is better, threshold: 0.5)
+- **Answer Relevancy**: Measures how relevant the answer is to the query (higher is better, threshold: 0.7)
+- **Faithfulness**: Evaluates if the answer is faithful to the retrieved context (higher is better, threshold: 0.7)
+
+These metrics focus on answer quality and are automatically calculated for each test case. Results are cached to avoid redundant API calls.
 
 #### Running Evaluations
 
@@ -126,18 +150,22 @@ To skip ingestion if data is already ingested:
 python evals/run_evaluation.py --skip-ingestion
 ```
 
-You can also customize the number of samples:
+You can customize the number of test cases:
 ```bash
-python evals/run_evaluation.py --squad-samples 50 --docvqa-samples 25 --fleurs-samples 25
+# Run with specific number of SQuAD v2 test cases (default: 10)
+python evals/run_evaluation.py --test-cases 20
+
+# Note: DocVQA and FLEURS are available but disabled by default
+# To enable them, modify the code or use the UI evaluation page
 ```
 
 **Parallel Execution**:
 ```bash
-# Run with 4 parallel workers (faster for large test suites)
-python evals/run_evaluation.py --skip-ingestion --parallel 4
+# Run with 3 parallel workers (faster for large test suites)
+python evals/run_evaluation.py --test-cases 20 --parallel 3
 
-# Combine with custom sample sizes
-python evals/run_evaluation.py --squad-samples 100 --parallel 4
+# Combine with automatic Confident AI upload
+python evals/run_evaluation.py --test-cases 10 --parallel 3 --use-automatic-upload
 ```
 
 **Note**: Parallel execution is recommended for large test suites. Start with 2-4 workers and adjust based on your system resources and API rate limits.
@@ -161,10 +189,9 @@ CONFIDENT_AI_ENABLED=true
 ```
 
 **Note**: 
-- DeepEval's automatic uploads work when using `evaluate()` function
-- Our current implementation uses `measure()` directly, so automatic uploads are not available
-- Custom upload endpoint is deprecated (404 error expected)
-- To use automatic uploads, consider refactoring to use DeepEval's `evaluate()` function
+- Use `--use-automatic-upload` flag to enable DeepEval's automatic Confident AI uploads
+- Requires `CONFIDENT_API_KEY` environment variable to be set
+- Results are automatically uploaded to Confident AI dashboard for visualization
 
 #### DeepEval Caching
 
@@ -201,20 +228,23 @@ python scripts/manage_deepeval_cache.py show
 ```
 multimodal-enterprise-rag/
 ├── docker-compose.yml          # Neo4j, Qdrant services
-├── requirements.txt
+├── requirements.txt            # Python dependencies
+├── LICENSE                     # MIT License
 ├── .env                        # API keys, configs
 ├── setup/                      # Database initialization
-├── evals/                      # Evaluation framework
+├── evals/                      # Evaluation framework (DeepEval)
 ├── ingestion/                  # Multi-modal processors
 ├── extraction/                 # Entity/relationship extraction
 ├── graph/                      # Neo4j operations
 ├── vector/                     # Qdrant operations
-├── search/                     # Hybrid search
-├── agents/                     # LangChain agents
-├── pipeline/                   # End-to-end pipelines
+├── search/                     # Hybrid search (keyword, vector, graph)
+├── agents/                     # Agent classes (validation, triage, retrieval, generation, post-processing)
+├── pipeline/                   # End-to-end pipelines (ingestion, query, agentic, CrewAI)
 ├── ui/                         # Streamlit interface
-├── utils/                      # Utilities
-└── tests/                      # Tests
+├── utils/                      # Utilities (config, errors, logging, telemetry)
+├── docs/                       # Documentation
+├── scripts/                    # Utility scripts (telemetry viewer, cache management, SSL fix)
+└── tests/                      # Unit and integration tests
 ```
 
 ## Error Handling
@@ -226,11 +256,56 @@ The system includes comprehensive error handling for:
 - Resource limitations
 - User input validation
 
+## Telemetry and Observability
+
+The system includes comprehensive telemetry for monitoring agent operations:
+
+- **Operation Tracking**: Tracks all agent operations with timing, success/error rates
+- **LangSmith Integration**: Automatic tracing for LangChain agent operations
+- **Metrics Collection**: Structured logging with operation-level metrics
+- **Export Capabilities**: Telemetry data can be exported for analysis
+
+View telemetry in the Streamlit UI or use the CLI tool:
+```bash
+python scripts/view_telemetry.py
+```
+
+## Architecture Decisions
+
+For detailed explanations of architectural choices, see [ARCHITECTURE.md](ARCHITECTURE.md). Key decisions include:
+
+- **Agentic Pipeline**: Provides sophisticated query understanding and multi-step reasoning
+- **CrewAI Integration**: Optional framework for role-based multi-agent orchestration
+- **Hybrid Search (RRF)**: Combines keyword, vector, and graph search for comprehensive retrieval
+- **Dual Storage**: Neo4j for structure, Qdrant for semantics - each optimized for its purpose
+- **Evaluation-First**: DeepEval integration ensures quality and continuous improvement
+- **Telemetry**: Comprehensive observability for production readiness
+
 ## License
 
-[Specify license]
+MIT License
+
+Copyright (c) 2025 Sangram Shinde
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ## Contributing
 
-[Contributing guidelines]
+Contributions are welcome! Please feel free to submit a Pull Request.
 

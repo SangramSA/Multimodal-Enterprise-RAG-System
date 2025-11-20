@@ -285,7 +285,7 @@ class TestDataIngester:
         """
         logger.info(f"Ingesting {num_samples} FLEURS transcriptions from TSV file (no audio processing)...")
         
-        tsv_file = Path(__file__).parent.parent / "fleurs-en_us-dataset.tsv"
+        tsv_file = Path(__file__).parent / "test_data" / "fleurs-en_us-dataset.tsv"
         ingested = []
         
         if not tsv_file.exists():
