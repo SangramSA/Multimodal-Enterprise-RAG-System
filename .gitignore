@@ -66,9 +66,12 @@ Thumbs.db
 # Evaluation results
 eval_results/
 test_results/
+.deepeval/
 
 # Streamlit
 .streamlit/
 .coverage
+htmlcov/
+
 # Cursor IDE
 .cursor/
