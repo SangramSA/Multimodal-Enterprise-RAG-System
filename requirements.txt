@@ -49,8 +49,7 @@ httpx==0.28.1
 aiohttp==3.13.2
 
 # Data processing
-numpy==2.3.4
-pandas==2.3.3
+# (numpy and pandas removed - were only used in deleted architecture diagram script)
 
 # Testing
 pytest==8.3.3
@@ -68,6 +67,3 @@ opentelemetry-exporter-otlp>=1.21.0
 # Multi-Agent Framework
 crewai>=0.28.0
 crewai-tools>=0.1.0
-
-# HTTP clients
-requests==2.32.3
