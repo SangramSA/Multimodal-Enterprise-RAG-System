@@ -46,7 +46,8 @@ cd Multimodal-Enterprise-RAG
 2. **Create environment file**:
 ```bash
 cp .env.example .env
-# Edit .env and add your OpenAI API key
+# Edit .env and add your OpenAI API key (required)
+# See .env.example for all available configuration options
 ```
 
 3. **Start Docker services**:
@@ -60,17 +61,24 @@ This will start:
 - Neo4j on ports 7474 (HTTP) and 7687 (Bolt)
 - Qdrant on ports 6333 (HTTP) and 6334 (gRPC)
 
-4. **Install Python dependencies**:
+4. **Create virtual environment** (recommended):
+```bash
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install --upgrade pip
+```
+
+5. **Install Python dependencies**:
 ```bash
 pip install -r requirements.txt
 ```
 
-5. **Initialize databases**:
+6. **Initialize databases**:
 ```bash
 python setup/init_databases.py
 ```
 
-6. **Run the Streamlit UI**:
+7. **Run the Streamlit UI**:
 ```bash
 streamlit run ui/app.py
 ```
@@ -122,7 +130,7 @@ The evaluation framework uses **DeepEval** for metrics calculation and **Confide
 The system evaluates using DeepEval generator metrics, following [DeepEval's RAG evaluation best practices](https://deepeval.com/docs/getting-started-rag):
 
 **Generator Metrics (Answer Quality)**:
-- **Hallucination Score**: Detects if the answer contains information not present in the retrieval context (lower is better, threshold: 0.5)
+- **Hallucination Detection**: Detects if the answer contains information not present in the retrieval context (lower is better, threshold: 0.2)
 - **Answer Relevancy**: Measures how relevant the answer is to the query (higher is better, threshold: 0.7)
 - **Faithfulness**: Evaluates if the answer is faithful to the retrieved context (higher is better, threshold: 0.7)
 
@@ -130,68 +138,61 @@ These metrics focus on answer quality and are automatically calculated for each 
 
 #### Running Evaluations
 
-1. **Ingest test data** (first time only):
+Run the complete evaluation pipeline (ingestion + evaluation):
 ```bash
-python evals/ingest_test_data.py
+python evals/run_evaluation.py --test-cases 10
 ```
 
-2. **Run evaluation**:
-```bash
-python evals/run_evaluation.py
-```
+**Command Line Arguments**:
+- `--test-cases N`: Number of SQuAD v2 test cases to evaluate (default: 10)
+- `--skip-ingestion`: Skip data ingestion (assumes data is already ingested)
+- `--parallel N`: Number of parallel workers for evaluation (default: 1)
+- `--use-automatic-upload`: Use DeepEval's automatic Confident AI upload
 
-Or run both steps together:
+**Examples**:
 ```bash
-python evals/run_evaluation.py
-```
+# Basic evaluation with 10 test cases
+python evals/run_evaluation.py --test-cases 10
 
-To skip ingestion if data is already ingested:
-```bash
-python evals/run_evaluation.py --skip-ingestion
-```
+# Skip ingestion if data already loaded
+python evals/run_evaluation.py --test-cases 10 --skip-ingestion
 
-You can customize the number of test cases:
-```bash
-# Run with specific number of SQuAD v2 test cases (default: 10)
-python evals/run_evaluation.py --test-cases 20
-
-# Note: DocVQA and FLEURS are available but disabled by default
-# To enable them, modify the code or use the UI evaluation page
-```
-
-**Parallel Execution**:
-```bash
-# Run with 3 parallel workers (faster for large test suites)
+# Parallel execution (faster for large test suites)
 python evals/run_evaluation.py --test-cases 20 --parallel 3
 
-# Combine with automatic Confident AI upload
+# With automatic Confident AI upload
 python evals/run_evaluation.py --test-cases 10 --parallel 3 --use-automatic-upload
 ```
 
-**Note**: Parallel execution is recommended for large test suites. Start with 2-4 workers and adjust based on your system resources and API rate limits.
+**Note**: 
+- Parallel execution speeds up evaluation but increases API rate limit usage
+- Start with 2-4 workers and adjust based on your system resources
+- DocVQA and FLEURS datasets are supported but disabled by default (set to 0 samples)
 
 #### Confident AI Integration
 
-**Important**: DeepEval automatically uploads results to Confident AI when using the `evaluate()` function. Since we use `measure()` directly for more control, automatic uploads are not available.
+The framework automatically uploads evaluation results to Confident AI for hosted reporting:
 
-To enable Confident AI reporting with DeepEval's native integration:
+1. **Sign up** at https://www.confident-ai.com/
+2. **Get your API key** from the dashboard
+3. **Add to `.env`**:
+   ```bash
+   CONFIDENT_API_KEY=your_api_key_here
+   CONFIDENT_AI_PROJECT=your_project_name
+   ```
 
-1. **Set the API key** (DeepEval expects `CONFIDENT_API_KEY`):
-```bash
-CONFIDENT_API_KEY=your_api_key
-```
+4. **Use automatic upload**:
+   ```bash
+   python evals/run_evaluation.py --test-cases 10 --use-automatic-upload
+   ```
 
-2. **Optional legacy support** (for custom client):
-```bash
-CONFIDENT_AI_API_KEY=your_api_key  # Legacy, also sets CONFIDENT_API_KEY
-CONFIDENT_AI_PROJECT=your_project_name
-CONFIDENT_AI_ENABLED=true
-```
+After evaluation, you'll receive:
+- A link to the Confident AI dashboard
+- Historical tracking of evaluation runs
+- Performance trends over time
+- Comparison of different model versions
 
-**Note**: 
-- Use `--use-automatic-upload` flag to enable DeepEval's automatic Confident AI uploads
-- Requires `CONFIDENT_API_KEY` environment variable to be set
-- Results are automatically uploaded to Confident AI dashboard for visualization
+**Note**: DeepEval automatically uploads results when `CONFIDENT_API_KEY` is set and `--use-automatic-upload` flag is used.
 
 #### DeepEval Caching
 
@@ -230,21 +231,46 @@ multimodal-enterprise-rag/
 ├── docker-compose.yml          # Neo4j, Qdrant services
 ├── requirements.txt            # Python dependencies
 ├── LICENSE                     # MIT License
-├── .env                        # API keys, configs
+├── .env.example               # Environment variables template
 ├── setup/                      # Database initialization
-├── evals/                      # Evaluation framework (DeepEval)
-├── ingestion/                  # Multi-modal processors
-├── extraction/                 # Entity/relationship extraction
-├── graph/                      # Neo4j operations
-├── vector/                     # Qdrant operations
-├── search/                     # Hybrid search (keyword, vector, graph)
+├── evals/                      # Evaluation framework (DeepEval, Confident AI)
+│   ├── test_data/              # Test datasets (SQuAD v2, DocVQA, FLEURS)
+│   └── README.md               # Evaluation documentation
+├── ingestion/                  # Multi-modal processors (text, image, audio)
+├── extraction/                 # Entity/relationship extraction, domain classification
+├── graph/                      # Neo4j operations and graph building
+├── vector/                     # Qdrant operations and embeddings
+├── search/                     # Hybrid search (keyword, vector, graph, RRF)
 ├── agents/                     # Agent classes (validation, triage, retrieval, generation, post-processing)
 ├── pipeline/                   # End-to-end pipelines (ingestion, query, agentic, CrewAI)
-├── ui/                         # Streamlit interface
-├── utils/                      # Utilities (config, errors, logging, telemetry)
-├── docs/                       # Documentation
+├── ui/                         # Streamlit interface (upload, query, graph explorer)
+├── utils/                      # Utilities (config, errors, logging, telemetry, LangSmith)
+├── docs/                       # Documentation (architecture, quickstart, guides)
 ├── scripts/                    # Utility scripts (telemetry viewer, cache management, SSL fix)
-└── tests/                      # Unit and integration tests
+└── tests/                      # Unit and integration tests (265+ tests)
+    ├── unit/                   # Unit tests for all modules
+    └── integration/            # Integration tests for pipelines
+```
+
+## Testing
+
+The system includes comprehensive test coverage:
+
+- **265+ unit tests** covering all major components
+- **Integration tests** for ingestion and query pipelines
+- **Test coverage** tracked with pytest-cov
+- **Mock-based testing** for isolated component testing
+
+Run tests:
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov
+
+# Run specific test file
+pytest tests/unit/test_hybrid_search.py
 ```
 
 ## Error Handling
@@ -255,6 +281,7 @@ The system includes comprehensive error handling for:
 - File processing errors
 - Resource limitations
 - User input validation
+- Graceful degradation when optional services are unavailable
 
 ## Telemetry and Observability
 
@@ -265,14 +292,31 @@ The system includes comprehensive telemetry for monitoring agent operations:
 - **Metrics Collection**: Structured logging with operation-level metrics
 - **Export Capabilities**: Telemetry data can be exported for analysis
 
+**Setup LangSmith** (optional):
+1. Sign up at https://smith.langchain.com/
+2. Get your API key from the dashboard
+3. Add to `.env`:
+   ```bash
+   LANGSMITH_API_KEY=your_api_key_here
+   LANGCHAIN_PROJECT=multimodal-rag
+   ```
+
 View telemetry in the Streamlit UI or use the CLI tool:
 ```bash
 python scripts/view_telemetry.py
 ```
 
+## Documentation
+
+- **[Architecture](docs/ARCHITECTURE.md)**: Detailed system architecture with component diagrams
+- **[Quick Start](docs/QUICKSTART.md)**: Step-by-step setup guide
+- **[Evaluation Framework](evals/README.md)**: DeepEval integration and evaluation guide
+- **[CrewAI Usage](docs/CREWAI_USAGE.md)**: Guide for using CrewAI orchestration
+- **[Telemetry](docs/TELEMETRY.md)**: Observability and monitoring guide
+
 ## Architecture Decisions
 
-For detailed explanations of architectural choices, see [ARCHITECTURE.md](ARCHITECTURE.md). Key decisions include:
+For detailed explanations of architectural choices, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Key decisions include:
 
 - **Agentic Pipeline**: Provides sophisticated query understanding and multi-step reasoning
 - **CrewAI Integration**: Optional framework for role-based multi-agent orchestration
