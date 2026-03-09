@@ -14,7 +14,7 @@ class VectorSearch:
     
     def search(self, query: str, limit: int = 10,
               filters: Optional[Dict[str, Any]] = None,
-              score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+              score_threshold: float = 0.25) -> List[Dict[str, Any]]:
         """
         Search using semantic similarity.
         

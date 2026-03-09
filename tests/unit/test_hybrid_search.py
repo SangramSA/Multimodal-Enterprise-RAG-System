@@ -240,6 +240,67 @@ class TestHybridSearch:
         
         assert len(results) <= 5
     
+    def test_final_cross_encoder_rerank_applies_to_top_n_only(
+        self,
+        mock_keyword_search,
+        mock_vector_search,
+        mock_graph_search,
+        monkeypatch,
+    ):
+        """Final-stage cross-encoder reranks only top-N fused results."""
+        # Base keyword results define initial fused ordering.
+        base_results = [
+            {"chunk_id": "chunk1", "content": "alpha"},
+            {"chunk_id": "chunk2", "content": "beta"},
+            {"chunk_id": "chunk3", "content": "gamma"},
+            {"chunk_id": "chunk4", "content": "delta"},
+        ]
+        mock_keyword_search.search.return_value = list(base_results)
+        mock_vector_search.search.return_value = []
+
+        # Dummy reranker that reverses the prefix it sees.
+        class DummyReranker:
+            def __init__(self, *_args, **_kwargs):
+                self.calls = 0
+                self.last_docs = None
+
+            def rerank(self, query, docs, *, rerank_k=None, score_key="rrf_score"):
+                self.calls += 1
+                self.last_docs = list(docs)
+                k = rerank_k or len(docs)
+                prefix = list(reversed(docs[:k]))
+                suffix = docs[k:]
+                # Attach a dummy rerank_score so existing code paths are satisfied.
+                rescored = []
+                for idx, d in enumerate(prefix):
+                    d2 = dict(d)
+                    d2["rerank_score"] = float(k - idx)
+                    rescored.append(d2)
+                return rescored + suffix, {"rerank_ms": 1.0}
+
+        from search import hybrid_search as hybrid_module
+
+        dummy_reranker = DummyReranker()
+        monkeypatch.setattr(hybrid_module, "CrossEncoderReranker", lambda *_a, **_k: dummy_reranker)
+
+        hs = HybridSearch(
+            mock_keyword_search,
+            mock_vector_search,
+            mock_graph_search,
+            use_final_rerank=True,
+            final_rerank_top_n=2,
+        )
+
+        results = hs.search("test query", limit=4, use_keyword=True, use_vector=True, use_graph=False)
+
+        # Reranker should have been called on only the top-2 docs.
+        assert dummy_reranker.calls == 1
+        assert dummy_reranker.last_docs is not None
+        assert [d["chunk_id"] for d in dummy_reranker.last_docs] == ["chunk1", "chunk2"]
+
+        # The top-2 are reversed by the reranker; tail remains unchanged.
+        assert [r["chunk_id"] for r in results] == ["chunk2", "chunk1", "chunk3", "chunk4"]
+    
     def test_search_filters_passed(self, hybrid_search, mock_keyword_search,
                                    mock_vector_search):
         """Test that filters are passed to search methods."""

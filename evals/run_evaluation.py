@@ -47,7 +47,7 @@ def run_evaluation(ingest_data: bool = True, test_cases: int = 10,
         from agents.retrieval_agent import RetrievalAgent
         from search.hybrid_search import HybridSearch
         from search.keyword_search import KeywordSearch
-        from search.vector_search import VectorSearch
+        from search.cached_vector_search import CachedVectorSearch
         from search.graph_search import GraphSearch
         from extraction.entity_extractor import EntityExtractor
         from extraction.domain_classifier import DomainClassifier
@@ -64,7 +64,7 @@ def run_evaluation(ingest_data: bool = True, test_cases: int = 10,
         
         # Search components
         keyword_search = KeywordSearch(vector_store)
-        vector_search = VectorSearch(vector_store)
+        vector_search = CachedVectorSearch(vector_store)
         graph_search = GraphSearch(neo4j_client)
         hybrid_search = HybridSearch(keyword_search, vector_search, graph_search)
         

@@ -1,11 +1,17 @@
 """Post-processing agent for answer validation and quality assurance."""
 
 from typing import List, Dict, Any, Optional
+import json
 import openai
 from loguru import logger
 
 from agents.base_agent import BaseAgent
-from utils.config import OPENAI_API_KEY, OPENAI_MODEL
+from utils.config import (
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    USE_LLM_JUDGE,
+    LLM_JUDGE_MODEL,
+)
 from utils.errors import APIError
 from agents.utils import calculate_confidence_from_scores
 
@@ -21,6 +27,8 @@ class PostProcessingAgent(BaseAgent):
             raise ValueError("OPENAI_API_KEY is required")
         self.client = openai.OpenAI(api_key=OPENAI_API_KEY)
         self.model = OPENAI_MODEL
+        self.use_llm_judge = USE_LLM_JUDGE
+        self.judge_model = LLM_JUDGE_MODEL or self.model
     
     def process(self, answer: str, sources: List[Dict], query: str) -> Dict[str, Any]:
         """
@@ -34,28 +42,49 @@ class PostProcessingAgent(BaseAgent):
         Returns:
             Post-processed result dictionary
         """
+        # Optional LLM-as-judge evaluation
+        judge_result: Optional[Dict[str, Any]] = None
+        if self.use_llm_judge:
+            try:
+                judge_result = self.llm_judge(query=query, answer=answer, sources=sources)
+            except Exception as e:
+                logger.warning(f"LLM judge evaluation failed, falling back to heuristic-only scores: {e}")
+                judge_result = None
+        
         # Validate answer
         validation = self.validate_answer(answer, sources)
         
-        # Detect hallucinations
-        hallucination_score = self.detect_hallucinations(answer, sources)
+        # Detect hallucinations (LLM judge result takes precedence when available)
+        hallucination_score = self.detect_hallucinations(answer, sources, judge_result=judge_result)
         
         # Verify citations
         citation_verification = self.verify_citations(answer, sources)
         
-        # Calculate confidence
-        confidence = self.calculate_confidence(answer, sources, validation, hallucination_score)
+        # Calculate confidence (optionally blended with LLM judge confidence)
+        confidence = self.calculate_confidence(
+            answer,
+            sources,
+            validation,
+            hallucination_score,
+            judge_result=judge_result,
+        )
         
         # Format response
         formatted_response = self._format_response(answer, sources, validation)
         
-        return {
+        result: Dict[str, Any] = {
             "final_answer": formatted_response,
             "confidence": confidence,
             "hallucination_score": hallucination_score,
             "citation_verification": citation_verification,
-            "validation": validation
+            "validation": validation,
         }
+        
+        # Attach raw judge output for downstream telemetry / UI when available
+        if judge_result is not None:
+            result["llm_judge"] = judge_result
+        
+        return result
     
     def validate_answer(self, answer: str, sources: List[Dict]) -> Dict[str, Any]:
         """
@@ -100,7 +129,12 @@ class PostProcessingAgent(BaseAgent):
         
         return validation_results
     
-    def detect_hallucinations(self, answer: str, sources: List[Dict]) -> float:
+    def detect_hallucinations(
+        self,
+        answer: str,
+        sources: List[Dict],
+        judge_result: Optional[Dict[str, Any]] = None,
+    ) -> float:
         """
         Detect potential hallucinations in answer.
         
@@ -111,6 +145,27 @@ class PostProcessingAgent(BaseAgent):
         Returns:
             Hallucination score (0-1, higher = more likely hallucination)
         """
+        # If an LLM judge result is available, prefer its hallucination / faithfulness signal
+        if judge_result:
+            # Direct hallucination score from judge (0-1, higher = more hallucination)
+            raw_hallucination = judge_result.get("hallucination_score")
+            if isinstance(raw_hallucination, (int, float)):
+                try:
+                    score = float(raw_hallucination)
+                    return max(0.0, min(score, 1.0))
+                except (TypeError, ValueError):
+                    pass
+            
+            # Derive hallucination score from faithfulness when provided
+            faithfulness = judge_result.get("faithfulness_score")
+            if isinstance(faithfulness, (int, float)):
+                try:
+                    faithfulness_score = float(faithfulness)
+                    hallucination_score = 1.0 - max(0.0, min(faithfulness_score, 1.0))
+                    return max(0.0, min(hallucination_score, 1.0))
+                except (TypeError, ValueError):
+                    pass
+        
         if not sources:
             return 0.5  # Can't verify without sources
         
@@ -173,8 +228,14 @@ class PostProcessingAgent(BaseAgent):
         
         return verification
     
-    def calculate_confidence(self, answer: str, sources: List[Dict], 
-                           validation: Dict[str, Any], hallucination_score: float) -> float:
+    def calculate_confidence(
+        self,
+        answer: str,
+        sources: List[Dict],
+        validation: Dict[str, Any],
+        hallucination_score: float,
+        judge_result: Optional[Dict[str, Any]] = None,
+    ) -> float:
         """
         Calculate overall confidence score.
         
@@ -209,10 +270,27 @@ class PostProcessingAgent(BaseAgent):
         validation_score = 1.0 if validation.get("is_valid", False) and len(validation.get("issues", [])) == 0 else 0.5
         confidence_factors.append(validation_score * 0.2)
         
-        # Calculate weighted average
-        confidence = sum(confidence_factors)
+        # Base heuristic confidence
+        base_confidence = sum(confidence_factors)
+        base_confidence = min(max(base_confidence, 0.0), 1.0)
         
-        return min(max(confidence, 0.0), 1.0)
+        # Optionally blend with LLM judge confidence when available
+        judge_confidence: Optional[float] = None
+        if judge_result:
+            raw_conf = judge_result.get("confidence_score")
+            if isinstance(raw_conf, (int, float)):
+                try:
+                    judge_confidence = float(raw_conf)
+                    judge_confidence = min(max(judge_confidence, 0.0), 1.0)
+                except (TypeError, ValueError):
+                    judge_confidence = None
+        
+        if judge_confidence is not None:
+            # Simple blend: heuristic (60%) + judge confidence (40%)
+            blended = 0.6 * base_confidence + 0.4 * judge_confidence
+            return min(max(blended, 0.0), 1.0)
+        
+        return base_confidence
     
     def _format_response(self, answer: str, sources: List[Dict], 
                         validation: Dict[str, Any]) -> str:
@@ -287,4 +365,96 @@ class PostProcessingAgent(BaseAgent):
                 max_match = max(max_match, match_score)
         
         return max_match
+
+    def llm_judge(
+        self,
+        query: str,
+        answer: str,
+        sources: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Use an LLM-as-judge to evaluate answer faithfulness and confidence.
+        
+        The judge is asked to return a compact JSON object with fields:
+          - faithfulness_score: float (0-1, higher = more grounded in sources)
+          - hallucination_score: float (0-1, higher = more hallucinated)
+          - confidence_score: float (0-1, higher = more confident)
+          - rationale: str (short explanation)
+        """
+        # Prepare a compact list of source snippets for the judge
+        source_snippets = []
+        for i, src in enumerate(sources[:5]):
+            content = src.get("content") or src.get("content_preview") or ""
+            if not content:
+                continue
+            source_snippets.append(
+                {
+                    "index": i,
+                    "file_name": src.get("file_name"),
+                    "modality": src.get("modality"),
+                    "snippet": content[:500],
+                }
+            )
+        
+        system_prompt = (
+            "You are an expert QA judge evaluating whether an answer is grounded in the provided sources.\n"
+            "Carefully compare the answer to the source snippets. Pay attention to factual claims, numbers, and entities.\n"
+            "Respond ONLY with a JSON object and no additional text."
+        )
+        
+        user_prompt = {
+            "query": query,
+            "answer": answer,
+            "sources": source_snippets,
+            "instructions": (
+                "Return a JSON object with the following keys:\n"
+                "  faithfulness_score: number between 0 and 1 (1 = fully grounded in sources).\n"
+                "  hallucination_score: number between 0 and 1 (1 = mostly hallucinated).\n"
+                "  confidence_score: number between 0 and 1 (your confidence in the answer quality).\n"
+                "  rationale: short explanation (1-3 sentences) of your judgment."
+            ),
+        }
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.judge_model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_prompt)},
+                ],
+            )
+            content = response.choices[0].message.content
+            if not content:
+                logger.warning("LLM judge returned empty content")
+                return None
+            
+            judge_json = json.loads(content)
+            if not isinstance(judge_json, dict):
+                logger.warning(f"LLM judge response is not a JSON object: {content[:200]}")
+                return None
+            
+            # Ensure expected keys exist (fill with defaults if missing)
+            result: Dict[str, Any] = {}
+            for key in ("faithfulness_score", "hallucination_score", "confidence_score"):
+                value = judge_json.get(key)
+                if isinstance(value, (int, float)):
+                    try:
+                        v = float(value)
+                        result[key] = max(0.0, min(v, 1.0))
+                    except (TypeError, ValueError):
+                        continue
+            rationale = judge_json.get("rationale")
+            if isinstance(rationale, str):
+                result["rationale"] = rationale
+            
+            # Return None if nothing useful was parsed
+            if not result:
+                logger.warning(f"LLM judge returned JSON without usable scores: {judge_json}")
+                return None
+            
+            return result
+        except Exception as e:
+            logger.warning(f"LLM judge call failed: {e}")
+            return None
 

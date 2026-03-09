@@ -18,6 +18,10 @@ OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 OPENAI_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
 
+# LLM-as-judge configuration
+USE_LLM_JUDGE = os.getenv("USE_LLM_JUDGE", "false").lower() in {"1", "true", "yes"}
+LLM_JUDGE_MODEL = os.getenv("LLM_JUDGE_MODEL", OPENAI_MODEL)
+
 # Neo4j Configuration
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -39,6 +43,10 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 EVAL_MODE = os.getenv("EVAL_MODE", "development")
 EVAL_LOG_PATH = os.getenv("EVAL_LOG_PATH", str(LOGS_DIR / "eval_results.json"))
 DEEPEVAL_CACHE_ENABLED = os.getenv("DEEPEVAL_CACHE_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+# Hallucination / confidence thresholds (used for future rule layers / telemetry)
+HALLUCINATION_ALERT_THRESHOLD = float(os.getenv("HALLUCINATION_ALERT_THRESHOLD", "0.5"))
+LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.4"))
 
 # Confident AI Configuration
 # Note: DeepEval uses CONFIDENT_API_KEY (not CONFIDENT_AI_API_KEY) for automatic uploads

@@ -45,8 +45,18 @@ class KeywordSearch:
         # In practice, you'd maintain a separate keyword index
         # For now, we'll use vector store to get candidates and then rank by keywords
         
-        # Get candidates
-        candidates = self.vector_store.search(query, limit=limit * 3, filters=filters)
+        # Get candidates with timing breakdown for observability, if available
+        timings_ms = {"total_ms": 0.0}
+        if isinstance(self.vector_store, VectorStore):
+            candidates, timings_ms = self.vector_store.search_with_timings(
+                query=query,
+                limit=limit * 3,
+                filters=filters,
+                score_threshold=0.0,
+            )
+        else:
+            # Test paths and alternative implementations fall back to basic search
+            candidates = self.vector_store.search(query, limit=limit * 3, filters=filters)
         
         if not candidates:
             return []
@@ -66,7 +76,8 @@ class KeywordSearch:
                 results.append({
                     **candidate,
                     "keyword_score": float(score),
-                    "combined_score": float(score)  # For now, just keyword score
+                    "combined_score": float(score),  # For now, just keyword score
+                    "keyword_latency_ms": timings_ms.get("total_ms", 0.0),
                 })
         
         # Sort by score and limit

@@ -10,6 +10,7 @@ from utils.errors import ValidationError, APIError
 from pipeline.validation import InputValidator
 from agents.retrieval_agent import RetrievalAgent
 from agents.query_rewriter import QueryRewriter
+from middleware.pipeline_cache import PipelineCache
 
 
 class QueryPipeline:
@@ -20,6 +21,7 @@ class QueryPipeline:
         self.retrieval_agent = retrieval_agent
         self.query_rewriter = QueryRewriter()
         self.client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+        self.pipeline_cache = PipelineCache()
     
     def process(self, query: str, query_type: Optional[str] = None,
                limit: int = 10, include_evaluation: bool = False) -> Dict[str, Any]:
@@ -36,14 +38,58 @@ class QueryPipeline:
             Complete response with answer, sources, and metadata
         """
         start_time = time.time()
+        validation_time = 0.0
+        triage_time = 0.0
+        cache_lookup_ms = 0.0
+        
+        logger.info(
+            "QueryPipeline.process | query_len={} | type_override={} | limit={} | include_evaluation={}",
+            len(query),
+            query_type,
+            limit,
+            include_evaluation,
+        )
         
         try:
             # 1. Input validation
+            validation_start = time.time()
             validation_result = self.validator.validate_query(query)
+            validation_time = time.time() - validation_start
             sanitized_query = validation_result["sanitized_query"]
+
+            # 1b. Pipeline-level semantic cache lookup
+            cache_lookup_start = time.time()
+            cache_hit, matched_query, cache_age_ms, cached_response = self.pipeline_cache.lookup(
+                sanitized_query
+            )
+            cache_lookup_ms = (time.time() - cache_lookup_start) * 1000.0
+            if cache_hit and cached_response:
+                # Shallow copy to avoid mutating cached object
+                response = dict(cached_response)
+                metadata = dict(response.get("metadata", {}))
+                metadata["pipeline_cache_hit"] = True
+                metadata["pipeline_cache_matched_query"] = matched_query
+                metadata["pipeline_cache_age_ms"] = cache_age_ms
+                metadata["pipeline_cache_lookup_ms"] = cache_lookup_ms
+                # Preserve original total time as cold_total_time if present
+                if "cold_total_time" not in metadata and "total_time" in metadata:
+                    metadata["cold_total_time"] = metadata["total_time"]
+                # Record the fast cached total time for this request
+                metadata["cached_total_time"] = time.time() - start_time
+                metadata["total_time"] = metadata["cached_total_time"]
+                response["metadata"] = metadata
+                logger.info(
+                    "QueryPipeline.process | PIPELINE CACHE HIT | query_len={} | matched_query_prefix='{}' | age_ms={:.1f}",
+                    len(query),
+                    (matched_query or "")[:80],
+                    cache_age_ms or 0.0,
+                )
+                return response
             
             # 2. Query triage/rewriting
+            triage_start = time.time()
             rewritten = self.query_rewriter.rewrite_query(sanitized_query, query_type)
+            triage_time = time.time() - triage_start
             
             # 3. Agent-based retrieval orchestration
             retrieval_start = time.time()
@@ -51,16 +97,31 @@ class QueryPipeline:
             retrieval_time = time.time() - retrieval_start
             
             if not retrieved_docs:
+                total_time = time.time() - start_time
+                logger.info(
+                    "QueryPipeline.process | NO RESULTS | query_type={} | validation_s={:.3f} | triage_s={:.3f} | retrieval_s={:.3f}",
+                    rewritten.get("query_type"),
+                    validation_time,
+                    triage_time,
+                    retrieval_time,
+                )
                 return {
                     "query": query,
                     "answer": "I couldn't find any relevant information to answer your question.",
                     "sources": [],
                     "confidence": 0.0,
-                    "metadata": {
-                        "retrieval_time": retrieval_time,
-                        "total_time": time.time() - start_time,
-                        "query_type": rewritten["query_type"]
-                    }
+                        "metadata": {
+                            "query_type": rewritten["query_type"],
+                            "retrieval_time": retrieval_time,
+                            "generation_time": 0.0,
+                            "validation_time": validation_time,
+                            "triage_time": triage_time,
+                            "pipeline_cache_lookup_ms": cache_lookup_ms,
+                            "total_time": total_time,
+                            "cold_total_time": total_time,
+                            "num_retrieved": 0,
+                            "pipeline_cache_hit": False,
+                        }
                 }
             
             # 4. Context assembly
@@ -82,8 +143,8 @@ class QueryPipeline:
                 eval_metrics = self._evaluate_response(query, answer, retrieved_docs)
             
             total_time = time.time() - start_time
-            
-            return {
+
+            response = {
                 "query": query,
                 "answer": answer,
                 "sources": citations,
@@ -93,11 +154,31 @@ class QueryPipeline:
                     "query_type": rewritten["query_type"],
                     "retrieval_time": retrieval_time,
                     "generation_time": generation_time,
+                    "validation_time": validation_time,
+                    "triage_time": triage_time,
+                    "pipeline_cache_lookup_ms": cache_lookup_ms,
                     "total_time": total_time,
-                    "num_retrieved": len(retrieved_docs)
+                    "cold_total_time": total_time,
+                    "num_retrieved": len(retrieved_docs),
+                    "pipeline_cache_hit": False,
                 },
                 "evaluation": eval_metrics
             }
+            # Store in pipeline cache for future semantic hits
+            self.pipeline_cache.store(sanitized_query, response)
+
+            logger.info(
+                "QueryPipeline.process | DONE | query_type={} | num_retrieved={} | validation_s={:.3f} | triage_s={:.3f} | retrieval_s={:.3f} | generation_s={:.3f} | total_s={:.3f}",
+                rewritten.get("query_type"),
+                len(retrieved_docs),
+                validation_time,
+                triage_time,
+                retrieval_time,
+                generation_time,
+                total_time,
+            )
+
+            return response
             
         except ValidationError as e:
             logger.error(f"Validation error: {e}")

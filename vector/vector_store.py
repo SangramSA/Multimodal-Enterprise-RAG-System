@@ -1,7 +1,8 @@
 """Vector store for indexing and retrieving chunks."""
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import hashlib
+import time
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 from loguru import logger
 
@@ -93,7 +94,7 @@ class VectorStore:
     
     def search(self, query: str, limit: int = 10, 
                filters: Optional[Dict[str, Any]] = None,
-               score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+               score_threshold: float = 0.25) -> List[Dict[str, Any]]:
         """
         Search for similar chunks.
         
@@ -106,64 +107,117 @@ class VectorStore:
         Returns:
             List of matching chunks with scores
         """
-        # Generate query embedding
-        query_embedding = self.embeddings.embed_text(query)
-        
-        # Build filter
-        qdrant_filter = None
+        results, _timings = self.search_with_timings(
+            query=query,
+            limit=limit,
+            filters=filters,
+            score_threshold=score_threshold,
+        )
+        return results
+
+    def search_with_timings(
+        self,
+        query: str,
+        limit: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        score_threshold: float = 0.25,
+        *,
+        query_embedding: Optional[List[float]] = None,
+        fetch_multiplier: int = 2,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+        """
+        Search for similar chunks and return per-stage timing breakdown.
+
+        Timings are returned in milliseconds.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of results to return
+            filters: Optional metadata filters (e.g., {"modality": "text", "domain_tags": ["finance"]})
+            score_threshold: Minimum similarity score
+            query_embedding: Optional precomputed embedding to avoid re-embedding
+            fetch_multiplier: Multiplier for initial Qdrant fetch to allow post-filtering
+
+        Returns:
+            (formatted_results, timings_ms)
+        """
+        timings_ms: Dict[str, float] = {
+            "openai_embed_ms": 0.0,
+            "qdrant_search_ms": 0.0,
+            "post_filter_ms": 0.0,
+            "format_results_ms": 0.0,
+        }
+
+        # 1) Embedding
+        if query_embedding is None:
+            t0 = time.perf_counter()
+            query_embedding = self.embeddings.embed_text(query)
+            timings_ms["openai_embed_ms"] = (time.perf_counter() - t0) * 1000.0
+
+        # 2) Build Qdrant filter (server-side)
+        qdrant_filter: Optional[Filter] = None
         if filters:
-            conditions = []
-            
-            if "modality" in filters:
+            conditions: List[FieldCondition] = []
+
+            # Most common filters we support server-side
+            if "modality" in filters and filters["modality"] is not None:
                 conditions.append(
                     FieldCondition(key="modality", match=MatchValue(value=filters["modality"]))
                 )
-            
-            if "domain_tags" in filters:
-                # Filter by domain tags (any of the tags)
-                domain_tags = filters["domain_tags"]
-                if isinstance(domain_tags, str):
-                    domain_tags = [domain_tags]
-                # Qdrant doesn't support array contains directly, so we'll filter in post-processing
-                # For now, we'll skip this filter in Qdrant and apply it after
-        
-        # Search
+            if "file_id" in filters and filters["file_id"] is not None:
+                conditions.append(
+                    FieldCondition(key="file_id", match=MatchValue(value=filters["file_id"]))
+                )
+
+            # NOTE: domain_tags is stored as an array in payload; Qdrant filtering for arrays
+            # depends on collection schema / match operators, so we apply it client-side below.
+
+            if conditions:
+                qdrant_filter = Filter(must=conditions)
+
+        # 3) Qdrant search
+        fetch_limit = max(limit * fetch_multiplier, limit)
+        t1 = time.perf_counter()
         results = self.qdrant.search(
             query_vector=query_embedding,
-            limit=limit * 2,  # Get more results for post-filtering
+            limit=fetch_limit,
             filter=qdrant_filter,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
         )
-        
-        # Apply domain tag filter if needed
-        if filters and "domain_tags" in filters:
+        timings_ms["qdrant_search_ms"] = (time.perf_counter() - t1) * 1000.0
+
+        # 4) Post-filtering (domain tags)
+        t2 = time.perf_counter()
+        if filters and "domain_tags" in filters and filters["domain_tags"] is not None:
             domain_tags = filters["domain_tags"]
             if isinstance(domain_tags, str):
                 domain_tags = [domain_tags]
-            
+
             filtered_results = []
             for result in results:
                 result_tags = result.get("payload", {}).get("domain_tags", [])
                 if any(tag in result_tags for tag in domain_tags):
                     filtered_results.append(result)
-            results = filtered_results[:limit]
-        else:
-            results = results[:limit]
-        
-        # Format results
-        formatted_results = []
+            results = filtered_results
+        timings_ms["post_filter_ms"] = (time.perf_counter() - t2) * 1000.0
+
+        # 5) Format + trim
+        t3 = time.perf_counter()
+        results = results[:limit]
+        formatted_results: List[Dict[str, Any]] = []
         for result in results:
-            formatted_results.append({
-                "chunk_id": result.get("payload", {}).get("chunk_id"),
-                "content": result.get("payload", {}).get("content"),
-                "score": result.get("score"),
-                "metadata": {
-                    k: v for k, v in result.get("payload", {}).items()
-                    if k not in ["content", "chunk_id"]
+            payload = result.get("payload", {}) or {}
+            formatted_results.append(
+                {
+                    "chunk_id": payload.get("chunk_id"),
+                    "content": payload.get("content"),
+                    "score": result.get("score"),
+                    "metadata": {k: v for k, v in payload.items() if k not in ["content", "chunk_id"]},
                 }
-            })
-        
-        return formatted_results
+            )
+        timings_ms["format_results_ms"] = (time.perf_counter() - t3) * 1000.0
+
+        return formatted_results, timings_ms
     
     def _chunk_id_to_point_id(self, chunk_id: str) -> int:
         """Convert chunk_id string to Qdrant point ID (integer)."""

@@ -24,6 +24,7 @@ from pipeline.crewai_tasks import (
 )
 from utils.telemetry import get_telemetry_collector
 from utils.errors import ValidationError, APIError
+from middleware.pipeline_cache import PipelineCache
 
 
 class CrewAIOrchestrator:
@@ -42,6 +43,7 @@ class CrewAIOrchestrator:
         self.retrieval_agent = retrieval_agent
         self.factory = CrewAIAgentFactory(retrieval_agent)
         self.telemetry = get_telemetry_collector()
+        self.pipeline_cache = PipelineCache()
         
         # Initialize tools with agent instances
         initialize_tools(
@@ -90,6 +92,39 @@ class CrewAIOrchestrator:
         current_query = query
         
         try:
+            # Pipeline-level semantic cache lookup
+            cache_lookup_start = time.time()
+            cache_hit, matched_query, cache_age_ms, cached_response = self.pipeline_cache.lookup(
+                current_query
+            )
+            pipeline_cache_lookup_ms = (time.time() - cache_lookup_start) * 1000.0
+            if cache_hit and cached_response:
+                result = dict(cached_response)
+                metadata = dict(result.get("metadata", {}))
+                metadata["pipeline_cache_hit"] = True
+                metadata["pipeline_cache_matched_query"] = matched_query
+                metadata["pipeline_cache_age_ms"] = cache_age_ms
+                metadata["pipeline_cache_lookup_ms"] = pipeline_cache_lookup_ms
+                if "cold_total_time" not in metadata and "total_time" in metadata:
+                    metadata["cold_total_time"] = metadata["total_time"]
+                metadata["cached_total_time"] = time.time() - start_time
+                metadata["total_time"] = metadata["cached_total_time"]
+                result["metadata"] = metadata
+                
+                self.telemetry.end_operation(
+                    pipeline_op_id,
+                    output_data={"confidence": result.get("confidence", 0.0), "iterations": 0},
+                    metadata=metadata,
+                )
+                return result
+            
+            # Stage-level timing accumulators (seconds)
+            validation_time = 0.0
+            triage_time = 0.0
+            retrieval_time = 0.0
+            generation_time = 0.0
+            qa_time = 0.0
+
             while iteration < max_iterations:
                 iteration += 1
                 logger.info(f"CrewAI Pipeline - Iteration {iteration}/{max_iterations}")
@@ -97,7 +132,9 @@ class CrewAIOrchestrator:
                 try:
                     # Stage 1: Validation
                     logger.info("Stage 1/5: Query Validation")
+                    t_validation = time.time()
                     validation_result = self._execute_validation(current_query)
+                    validation_time = time.time() - t_validation
                     
                     if not validation_result.get("is_valid", False):
                         raise ValidationError(
@@ -108,7 +145,9 @@ class CrewAIOrchestrator:
                     
                     # Stage 2: Triage
                     logger.info("Stage 2/5: Query Triage")
+                    t_triage = time.time()
                     triage_result = self._execute_triage(sanitized_query)
+                    triage_time = time.time() - t_triage
                     
                     # Stage 3: Retrieval
                     logger.info("Stage 3/5: Retrieval")
@@ -156,17 +195,29 @@ class CrewAIOrchestrator:
                                 "methods_used": retrieval_result.get("methods_used", []),
                                 "query_type": triage_result["query_type"],
                                 "complexity": validation_result.get("complexity", "unknown"),
-                                "intent": validation_result.get("intent", "unknown"),
                                 "retrieval_time": retrieval_time,
                                 "generation_time": generation_time,
                                 "qa_time": qa_time,
+                                "validation_time": validation_time,
+                                "triage_time": triage_time,
+                                "pipeline_cache_lookup_ms": pipeline_cache_lookup_ms,
                                 "total_time": total_time,
+                                "cold_total_time": total_time,
                                 "num_retrieved": len(results),
                                 "hallucination_score": final_result.get("hallucination_score", 0.0),
-                                "citation_verification": final_result.get("citation_verification", {})
+                                "pipeline_cache_hit": False,
                             },
                             "reasoning_steps": answer_result.get("reasoning_steps", [])
                         }
+                        
+                        # If LLM-as-judge details are present, surface them under metadata
+                        llm_judge = final_result.get("llm_judge")
+                        if llm_judge is not None:
+                            # Store under a dedicated key so the UI / telemetry can consume it safely
+                            result["metadata"]["llm_judge"] = llm_judge
+                        
+                        # Store successful result in pipeline cache
+                        self.pipeline_cache.store(query, result)
                         
                         self.telemetry.end_operation(
                             pipeline_op_id,

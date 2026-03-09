@@ -75,7 +75,7 @@ class QdrantClientWrapper:
             return False
     
     def search(self, query_vector: List[float], limit: int = 10, 
-               filter: Optional[Filter] = None, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+               filter: Optional[Filter] = None, score_threshold: float = 0.25) -> List[Dict[str, Any]]:
         """Search for similar vectors."""
         def _search():
             self.ensure_collection()

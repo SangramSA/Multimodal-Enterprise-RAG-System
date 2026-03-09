@@ -29,6 +29,7 @@ graph TB
     subgraph "Query Pipeline"
         subgraph "Standard Pipeline"
             QR[Query Rewriter<br/>Classification & Expansion]
+            PC[Pipeline Cache<br/>Semantic Answer Cache]
             RA[Retrieval Agent<br/>LangChain Tools]
             AG1[Answer Generation]
         end
@@ -47,7 +48,7 @@ graph TB
     subgraph "Search Layer"
         GS[Graph Search<br/>Cypher Queries<br/>Entity Traversal]
         KS[Keyword Search<br/>BM25 Algorithm<br/>Metadata Filtering]
-        VS[Vector Search<br/>Cosine Similarity<br/>Semantic Matching]
+        VS[Vector Search<br/>Cached + Reranked<br/>Semantic Matching]
         HS[Hybrid Search<br/>Reciprocal Rank Fusion<br/>Combines All Methods]
     end
     
@@ -74,6 +75,9 @@ graph TB
     
     %% Query Flow - Standard Pipeline
     UI -->|Query| QR
+    UI -->|Query| PC
+    PC -->|Cache Hit Response| UI
+    PC -->|Cache Miss| QR
     QR -->|Rewritten Query| RA
     RA -->|Search Request| HS
     HS -->|Query| GS
@@ -165,7 +169,7 @@ graph TB
 
 ### 4. Search Layer
 - **Keyword Search**: BM25-based keyword matching with metadata filtering
-- **Vector Search**: Semantic similarity search using OpenAI embeddings
+- **Vector Search**: Semantic similarity search using OpenAI embeddings, enhanced with semantic caching and local reranking
 - **Graph Search**: Cypher queries for entity traversal and relationship discovery
 - **Hybrid Search**: Combines all three methods using Reciprocal Rank Fusion (RRF)
 
@@ -201,6 +205,29 @@ graph TB
 - **LangSmith Integration**: LangChain tracing and monitoring for agent operations
 - **Metrics Collection**: Structured logging with operation-level metrics
 - **Export Capabilities**: Telemetry data can be exported for analysis
+- **Production Readiness**: Observability is critical for production deployments to monitor system health.
+
+### 10. Caching & Reranking (Additions)
+
+- **Pipeline Cache (Semantic Answer Cache)**: 
+  - **Addition**: New in-memory, semantic LRU+TTL cache at the query pipeline level.
+  - **Behavior**: Caches full pipeline responses (answer + sources + metadata) keyed by a normalized embedding of the sanitized user query, enabling fast cache hits before any retrieval or generation work.
+  - **Placement**: Sits between input validation and query triage/rewriting in the standard pipeline flow.
+
+- **Semantic Cache for Vector Results**:
+  - **Addition**: New retrieval-layer cache that stores and serves retrieved document lists based on semantic similarity of the query.
+  - **Behavior**: On hit, returns cached retrieval results without touching the vector DB; on miss, downstream vector search executes and stores fresh results.
+  - **Placement**: Lives alongside the vector search leg as a middleware layer, conceptually inside the `Vector Search` box.
+
+- **Local Cross-Encoder Reranker**:
+  - **Addition**: New lightweight reranking component using a local cross-encoder model.
+  - **Behavior**: Re-scores a small prefix of high-scoring candidates from the vector DB, improving final ranking quality while keeping latency modest.
+  - **Placement**: Applied within the vector-search leg and optionally as a final rerank step in hybrid search.
+
+- **Cached Vector Search**:
+  - **Addition**: New drop-in vector search implementation that combines semantic caching, candidate expansion, and reranking with detailed latency breakdowns.
+  - **Behavior**: Fetches an expanded candidate set from the vector DB, applies semantic cache checks, and reranks top candidates locally before returning final results with middleware metadata.
+  - **Placement**: Replaces or wraps the original `Vector Search` implementation while preserving the same external interface used by the hybrid search and retrieval agents.
 
 ## Data Flow
 

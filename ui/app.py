@@ -20,7 +20,7 @@ from agents.retrieval_agent import RetrievalAgent
 from agents.retrieval_orchestration_agent import RetrievalOrchestrationAgent
 from search.hybrid_search import HybridSearch
 from search.keyword_search import KeywordSearch
-from search.vector_search import VectorSearch
+from search.cached_vector_search import CachedVectorSearch
 from search.graph_search import GraphSearch
 from graph.neo4j_client import Neo4jClient
 from vector.vector_store import VectorStore
@@ -70,9 +70,15 @@ def initialize_system():
         
         # Search components
         keyword_search = KeywordSearch(vector_store)
-        vector_search = VectorSearch(vector_store)
+        vector_search = CachedVectorSearch(vector_store)
         graph_search = GraphSearch(neo4j_client)
-        hybrid_search = HybridSearch(keyword_search, vector_search, graph_search)
+        hybrid_search = HybridSearch(
+            keyword_search,
+            vector_search,
+            graph_search,
+            use_final_rerank=True,
+            final_rerank_top_n=20,
+        )
         
         # Agents
         retrieval_agent = RetrievalAgent(hybrid_search)
@@ -258,16 +264,9 @@ if page == "File Upload":
 elif page == "Query":
     st.header("Query the Knowledge Base")
     
-    # Pipeline selection
-    # Legacy agentic pipeline checkbox removed (system now uses CrewAI or legacy pipeline)
-    use_crewai = st.checkbox("Use CrewAI Orchestration (Experimental)", value=False)
-    
-    if use_crewai:
-        st.info("🤖 CrewAI mode: Using CrewAI framework for multi-agent orchestration.")
-    else:
-        st.info("📚 Legacy mode: Using standard query pipeline.")
-    
-    
+    # Always use CrewAI/agentic orchestration in the UI for clarity
+    use_crewai = True
+    st.info("🤖 Agentic mode: Using CrewAI multi-agent orchestration for queries.")
     
     query = st.text_area("Enter your query", height=100)
     
@@ -373,11 +372,11 @@ elif page == "Query":
                     else:
                         st.info("No sources found")
                     
-                    # Display metadata
+                    # Display metadata (always, regardless of whether sources exist)
                     with st.expander("Query Metadata"):
                         metadata = response.get("metadata", {})
                         st.json(metadata)
-                        st.write(f"**Total Time:** {elapsed_time:.2f}s")
+                        st.write(f"**Total Time (this run):** {elapsed_time:.2f}s")
                         st.write(f"**Confidence:** {response.get('confidence', 0):.2f}")
                         
                         if use_crewai:
@@ -385,6 +384,77 @@ elif page == "Query":
                             st.write(f"**Methods Used:** {', '.join(metadata.get('methods_used', []))}")
                             if metadata.get('hallucination_score') is not None:
                                 st.write(f"**Hallucination Score:** {metadata.get('hallucination_score', 0):.3f}")
+                            
+                            # Optional LLM-as-judge details (when available)
+                            llm_judge = metadata.get("llm_judge")
+                            if llm_judge:
+                                st.markdown("---")
+                                st.subheader("LLM Judge Evaluation")
+                                faithfulness = llm_judge.get("faithfulness_score")
+                                hallucination = llm_judge.get("hallucination_score")
+                                judge_conf = llm_judge.get("confidence_score")
+                                rationale = llm_judge.get("rationale")
+                                
+                                if faithfulness is not None:
+                                    st.write(f"**Faithfulness Score:** {float(faithfulness):.3f}")
+                                if hallucination is not None:
+                                    st.write(f"**Judge Hallucination Score:** {float(hallucination):.3f}")
+                                if judge_conf is not None:
+                                    st.write(f"**Judge Confidence Score:** {float(judge_conf):.3f}")
+                                if rationale:
+                                    st.write("**Judge Rationale:**")
+                                    st.write(rationale)
+
+                    # Pipeline-level timing comparison (cold vs cached)
+                    st.markdown("---")
+                    st.subheader("Pipeline Timing Breakdown")
+                    pipeline_cache_hit = metadata.get("pipeline_cache_hit", False)
+                    cold_total = metadata.get("cold_total_time")
+                    cached_total = metadata.get("cached_total_time", elapsed_time)
+
+                    if pipeline_cache_hit and cold_total is not None:
+                        st.write(f"**Cold Total Time (original run):** {cold_total:.2f}s")
+                        st.write(f"**Cached Total Time (this run):** {cached_total:.2f}s")
+                        if metadata.get("pipeline_cache_matched_query"):
+                            st.write(
+                                f"**Pipeline Cache Matched Query:** "
+                                f"`{metadata.get('pipeline_cache_matched_query')}`"
+                            )
+                        age_ms = metadata.get("pipeline_cache_age_ms")
+                        if age_ms is not None:
+                            st.write(f"**Pipeline Cache Age:** {age_ms:.1f} ms")
+                    else:
+                        st.write(
+                            f"**Cold Total Time (this run):** "
+                            f"{metadata.get('total_time', elapsed_time):.2f}s"
+                        )
+
+                    # Show stage-level breakdown from metadata if available (in ms)
+                    stage_fields = [
+                        ("validation_time", "Validation Time"),
+                        ("triage_time", "Triage Time"),
+                        ("retrieval_time", "Retrieval Time"),
+                        ("generation_time", "Generation Time"),
+                        ("qa_time", "QA Time"),
+                        ("postprocess_time", "Post-Processing Time"),
+                    ]
+                    for key, label in stage_fields:
+                        if key in metadata and metadata.get(key) is not None:
+                            # Timings are stored in seconds; convert to ms for display.
+                            value_s = float(metadata.get(key, 0.0) or 0.0)
+                            value_ms = value_s * 1000.0
+                            st.write(f"**{label}:** {value_ms:.4f} ms")
+
+                    # Pipeline cache lookup timing (already stored in ms)
+                    if "pipeline_cache_lookup_ms" in metadata:
+                        lookup_ms = float(metadata.get("pipeline_cache_lookup_ms", 0.0) or 0.0)
+                        st.write(f"**Pipeline Cache Lookup:** {lookup_ms:.4f} ms")
+                    
+                    if pipeline_cache_hit:
+                        st.caption(
+                            "Stage timings reflect the original cold pipeline run; "
+                            "this request reused the cached response."
+                        )
                 
                 except Exception as e:
                     st.error(f"Query failed: {e}")

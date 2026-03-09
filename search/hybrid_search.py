@@ -6,17 +6,38 @@ from loguru import logger
 from search.keyword_search import KeywordSearch
 from search.vector_search import VectorSearch
 from search.graph_search import GraphSearch
+from middleware.reranker import CrossEncoderReranker, RerankerConfig
 
 
 class HybridSearch:
     """Combine multiple search methods with RRF reranking."""
     
-    def __init__(self, keyword_search: KeywordSearch, vector_search: VectorSearch, 
-                 graph_search: GraphSearch):
+    def __init__(
+        self,
+        keyword_search: KeywordSearch,
+        vector_search: VectorSearch,
+        graph_search: GraphSearch,
+        *,
+        use_final_rerank: bool = False,
+        final_rerank_top_n: int = 20,
+        final_rerank_config: Optional[RerankerConfig] = None,
+    ):
         self.keyword_search = keyword_search
         self.vector_search = vector_search
         self.graph_search = graph_search
         self.rrf_k = 60  # RRF constant
+
+        self.use_final_rerank = use_final_rerank
+        self.final_rerank_top_n = max(0, int(final_rerank_top_n))
+        self._final_reranker: Optional[CrossEncoderReranker]
+        if self.use_final_rerank and self.final_rerank_top_n > 0:
+            # Use a dedicated config so we can tune top-N separately from vector leg.
+            config = final_rerank_config or RerankerConfig(
+                rerank_k=self.final_rerank_top_n
+            )
+            self._final_reranker = CrossEncoderReranker(config)
+        else:
+            self._final_reranker = None
     
     def reciprocal_rank_fusion(self, result_lists: List[List[Dict[str, Any]]]) -> Dict[str, float]:
         """
@@ -39,11 +60,15 @@ class HybridSearch:
         
         return scores
     
-    def search(self, query: str, limit: int = 10,
-              filters: Optional[Dict[str, Any]] = None,
-              use_keyword: bool = True,
-              use_vector: bool = True,
-              use_graph: bool = True) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        use_keyword: bool = True,
+        use_vector: bool = True,
+        use_graph: bool = True,
+    ) -> List[Dict[str, Any]]:
         """
         Perform hybrid search combining all methods.
         
@@ -58,6 +83,16 @@ class HybridSearch:
         Returns:
             Combined and reranked results
         """
+        logger.info(
+            "HybridSearch.search | query_prefix='{}' | limit={} | keyword={} | vector={} | graph={} | final_rerank={}",
+            query[:80],
+            limit,
+            use_keyword,
+            use_vector,
+            use_graph,
+            self.use_final_rerank,
+        )
+
         all_results = []
         result_lists = []
         
@@ -99,6 +134,7 @@ class HybridSearch:
         
         # Combine using RRF
         if not result_lists:
+            logger.info("HybridSearch.search | no results from any modality")
             return []
         
         rrf_scores = self.reciprocal_rank_fusion(result_lists)
@@ -135,6 +171,40 @@ class HybridSearch:
                 deduplicated.append(result)
                 if len(deduplicated) >= limit:
                     break
-        
+
+        # Optional final-stage cross-encoder rerank over top-N fused results.
+        if (
+            self.use_final_rerank
+            and self._final_reranker is not None
+            and deduplicated
+            and self.final_rerank_top_n > 0
+        ):
+            top_n = min(self.final_rerank_top_n, len(deduplicated))
+            prefix = deduplicated[:top_n]
+            suffix = deduplicated[top_n:]
+
+            logger.info(
+                "HybridSearch.final_rerank | query_prefix='{}' | top_n={} | total_results={}",
+                query[:80],
+                top_n,
+                len(deduplicated),
+            )
+
+            try:
+                reranked_prefix, _timings = self._final_reranker.rerank(
+                    query=query,
+                    docs=prefix,
+                    rerank_k=top_n,
+                    score_key="rrf_score",
+                )
+                deduplicated = reranked_prefix + suffix
+            except Exception as e:
+                logger.warning("HybridSearch.final_rerank failed, using RRF ordering: {}", e)
+
+        logger.info(
+            "HybridSearch.search | final_results={}",
+            len(deduplicated),
+        )
+
         return deduplicated
 

@@ -184,6 +184,11 @@ class AgenticQueryPipeline:
                             "reasoning_steps": answer_result.get("reasoning_steps", [])
                         }
                         
+                        # Surface optional LLM-as-judge details alongside other metadata
+                        llm_judge = final_result.get("llm_judge")
+                        if llm_judge is not None:
+                            result["metadata"]["llm_judge"] = llm_judge
+                        
                         # Complete telemetry tracking
                         self.telemetry.end_operation(
                             pipeline_op_id,
